@@ -1,0 +1,62 @@
+# This is the only project file you normally edit.
+#
+# Add your chosen vision-capable models below. id is the exact OpenRouter
+# model id (or the id accepted by a compatible endpoint). Keep API keys in .env.
+
+[run]
+# Any OpenAI-compatible Chat Completions endpoint works. Individual models can
+# override either of these fields when they come from another provider.
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+api_key_env = "OPENROUTER_API_KEY"
+timeout_seconds = 180
+retry_attempts = 2
+image_detail = "high"
+
+# The runner will stop starting new requests after reported API spend reaches
+# this amount. Set to 0 to disable the guard; provider-reported cost is required
+# for the guard to work.
+max_total_cost_usd = 10.00
+
+# Merged into every model request, then overridden by that model's request.
+request = { temperature = 0.15, max_tokens = 6000 }
+
+[benchmark]
+# The public Ducky Bench vote page contains the reference image for each test.
+vote_page = "https://ducky-bench.joinity.site/index.php"
+test_ids = [1, 2, 3]
+
+# This is a transparent, reproducible candidate protocol. Confirm the
+# maintainer's original prompt/settings before presenting outputs as official.
+prompt = """
+Recreate the supplied reference image as a standalone SVG vector illustration.
+Match its composition, silhouette, palette, major details, and visual style as
+closely as possible. Use only native SVG shapes, paths, fills, and strokes.
+Do not use <image>, foreignObject, raster embeds, external assets, base64 data,
+or text labels. Return only complete, valid SVG markup—no Markdown or prose.
+"""
+
+# Replace or copy this block until you have your ~10 favorites. Models must
+# accept image input through an OpenAI-compatible chat-completions API.
+[[models]]
+label = "Replace me 01"
+id = "provider/model-id"
+enabled = false
+# Example: request = { temperature = 0.10, max_tokens = 8000, reasoning = { effort = "high" } }
+request = {}
+
+[[models]]
+label = "Replace me 02"
+id = "provider/model-id"
+enabled = false
+request = {}
+
+[[models]]
+label = "Replace me 03"
+id = "provider/model-id"
+enabled = false
+
+# Optional per-model overrides:
+# endpoint = "https://provider.example/v1/chat/completions"
+# api_key_env = "PROVIDER_API_KEY"
+# request = { temperature = 0.10, max_tokens = 8000 }
+
