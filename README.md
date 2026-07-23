@@ -1,12 +1,52 @@
 # Ducky Bench additions
 
-Run a small, reproducible set of vision-capable models against Ducky Bench's three public SVG-reference tasks. You ordinarily edit only models.toml; API secrets belong in local .env, never in Git.
+A tiny runner for trying OpenRouter models on Ducky Bench's public SVG-image tasks.
 
-This project generates candidate SVGs, the source/config metadata, a side-by-side review page, and a ZIP submission bundle. It does not insert models or votes into Ducky Bench's public leaderboard—the site exposes voting, not a public model-submission API. Confirm the benchmark maintainer's exact prompt/settings before calling results official.
+You pick the models in `models.toml`, run the workflow, and get a review page plus a ZIP of the results. Nothing here posts votes or changes the public leaderboard.
 
-## Quick start
+## The easy route: run it from GitHub
 
-Requires Python 3.11+; no packages to install.
+1. In this repo, go to **Settings → Secrets and variables → Actions**.
+2. Add a repository secret named `OPENROUTER_API_KEY`.
+3. Open the **Actions** tab, choose **Run Ducky Bench**, then click **Run workflow**.
+4. When it finishes, download the run artifact. It contains the SVGs, a side-by-side `review.html`, and `submission-bundle.zip`.
+
+The workflow is manual only. Pushing a config edit does not call any models.
+
+## Pick models
+
+Open [`models.toml`](models.toml). Every named model starts with:
+
+~~~toml
+enabled = false
+~~~
+
+Change that to `true` for the handful you want. The file is grouped into cheap vision picks, small same-family comparisons, and a requested text-model catalog.
+
+The default also has:
+
+~~~toml
+[free_vision]
+enabled = true
+~~~
+
+That means each real run adds every *currently free* OpenRouter model that can read an image. It skips Gemma and Venice models, plus embeddings, guardrails, and rerankers. Set it to `false` if you want only the models you explicitly enabled.
+
+This benchmark needs image input. Before calling OpenRouter, the runner checks the live model list and skips text-only or retired IDs rather than spending money on a request that cannot work.
+
+## Keep the cost boring
+
+`models.toml` starts with a $5 reported-cost ceiling for paid models:
+
+~~~toml
+max_total_cost_usd = 5.00
+~~~
+
+Free models do not count toward it. Lower it, raise it, or use `0` to turn the ceiling off. The runner still needs a real OpenRouter key for free models.
+
+## Running it on your machine
+
+Python 3.11+ is enough—there are no packages to install.
 
 ~~~bash
 git clone https://github.com/cheeseonamonkey/Ducky-Bench-additions.git
@@ -14,72 +54,34 @@ cd Ducky-Bench-additions
 cp .env.example .env
 ~~~
 
-1. Put an API key in .env.
-2. Edit models.toml: enable and name your chosen models; keep them vision-capable.
-3. Inspect the no-cost plan:
+Put your key in `.env`, make your model choices, then check the plan:
 
 ~~~bash
 python3 run.py
 ~~~
 
-4. Run it deliberately:
+Run it for real:
 
 ~~~bash
-python3 run.py --execute --run-name first-ten
+python3 run.py --execute --run-name first-try
 ~~~
 
-The run requires three requests per enabled model. Ten models = 30 API calls. The default config stops starting new calls after the provider-reported spend reaches $10; change max_total_cost_usd if desired.
-
-## Config
-
-models.toml uses an OpenAI-compatible Chat Completions endpoint, defaulting to OpenRouter. Each model has:
-
-~~~toml
-[[models]]
-label = "My favorite model"
-id = "provider/model-id"
-enabled = true
-request = { temperature = 0.10, max_tokens = 8000 }
-~~~
-
-For a per-model endpoint/key, add:
-
-~~~toml
-endpoint = "https://provider.example/v1/chat/completions"
-api_key_env = "PROVIDER_API_KEY"
-~~~
-
-Extra request fields are passed through verbatim, so provider-specific fields such as reasoning = { effort = "high" } work when supported.
-
-## Outputs
-
-Each execution writes an ignored directory under runs/<run-name>/:
-
-~~~text
-references/             downloaded public target images
-outputs/<model>/        validated SVG outputs
-responses/<model>/      raw API responses
-models.toml             frozen configuration snapshot
-manifest.json           model IDs, prompt, sources, artifacts, reported spend
-review.html             local visual comparison page
-submission-bundle.zip   compact handoff package
-~~~
-
-Use a stable name plus --resume to reuse valid finished SVGs after an interruption:
+If a run stops halfway through, resume it without redoing valid outputs:
 
 ~~~bash
-python3 run.py --execute --run-name first-ten --resume
+python3 run.py --execute --run-name first-try --resume
 ~~~
 
-You can restrict a retry to a model or test:
+## What you get
 
-~~~bash
-python3 run.py --execute --run-name first-ten --resume --model "My favorite model" --test 2
-~~~
+Each run creates an ignored folder under `runs/` with:
 
-## Protocol caveat
+- the public reference images
+- generated SVGs and raw model responses
+- `review.html` for quick side-by-side checking
+- `manifest.json` with the exact IDs, prompt, and costs
+- `submission-bundle.zip`
 
-The public [Ducky Bench voting page](https://ducky-bench.joinity.site/index.php?test=1) says models recreate raster references as SVGs. Its page does not disclose its full original generation protocol or provide a model-import endpoint. This runner uses the public target images and records its own explicit prompt/settings so the work is repeatable—but it cannot establish comparable official Elo by itself.
+## One honest caveat
 
-For an official addition, send the maintainer the generated bundle plus exact model/provider IDs and settings, then ask them to import the outputs and create the pairings.
-
+This makes reproducible candidate outputs, not official Ducky Bench Elo. The public site lets people vote but does not expose a public model-import API or its complete original generation setup. If you want an official addition, send the maintainer the ZIP along with the exact model IDs and settings.
