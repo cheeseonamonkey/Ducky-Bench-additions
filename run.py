@@ -33,6 +33,7 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parent
 USER_AGENT = "ducky-bench-additions/0.1 (+https://github.com/cheeseonamonkey/Ducky-Bench-additions)"
 IGNORED_IMAGE_ALTS = {"ducky bench", "model a", "model b"}
+OPENROUTER_MODEL_CATALOG = "https://openrouter.ai/api/v1/models"
 
 
 class ConfigError(ValueError):
@@ -50,6 +51,7 @@ class Model:
     request: dict[str, Any]
     endpoint: str | None = None
     api_key_env: str | None = None
+    source: str = "models.toml"
 
 
 @dataclass(frozen=True)
@@ -124,7 +126,7 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ConfigError(f"Invalid TOML in {path}: {exc}") from exc
 
 
-def selected_models(config: dict[str, Any], requested: list[str]) -> list[Model]:
+def configured_models(config: dict[str, Any]) -> list[Model]:
     raw_models = config.get("models", [])
     if not isinstance(raw_models, list):
         raise ConfigError("models must be a list of [[models]] blocks")
@@ -146,6 +148,11 @@ def selected_models(config: dict[str, Any], requested: list[str]) -> list[Model]
         api_key_env = str(raw.get("api_key_env", "")).strip() or None
         models.append(Model(label, model_id, dict(request), endpoint, api_key_env))
 
+    return models
+
+
+def select_requested_models(models: list[Model], requested: list[str]) -> list[Model]:
+
     if not requested:
         return models
     wanted = set(requested)
@@ -153,7 +160,7 @@ def selected_models(config: dict[str, Any], requested: list[str]) -> list[Model]
     found = {item.label for item in picked} | {item.model_id for item in picked}
     missing = wanted - found
     if missing:
-        raise ConfigError(f"No enabled model matches: {', '.join(sorted(missing))}")
+        raise ConfigError(f"No selected model matches: {', '.join(sorted(missing))}")
     return picked
 
 
@@ -182,6 +189,135 @@ def fetch_bytes(url: str, timeout_seconds: int) -> tuple[bytes, str]:
         raise RunError(f"GET {url} failed with HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
         raise RunError(f"GET {url} failed: {exc.reason}") from exc
+
+
+def is_openrouter_endpoint(endpoint: str) -> bool:
+    host = (urlparse(endpoint).hostname or "").lower()
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+
+def openrouter_catalog(timeout_seconds: int) -> dict[str, dict[str, Any]]:
+    """Return the current public OpenRouter model registry keyed by exact id."""
+    raw, _ = fetch_bytes(OPENROUTER_MODEL_CATALOG, timeout_seconds)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RunError("OpenRouter returned an unreadable model catalog") from exc
+    entries = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise RunError("OpenRouter model catalog did not contain a data list")
+    catalog: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("id")
+        if isinstance(model_id, str) and model_id:
+            catalog[model_id] = entry
+    if not catalog:
+        raise RunError("OpenRouter model catalog was empty")
+    return catalog
+
+
+def model_supports_image_to_text(entry: dict[str, Any]) -> bool:
+    architecture = entry.get("architecture")
+    if not isinstance(architecture, dict):
+        return False
+    inputs = architecture.get("input_modalities")
+    outputs = architecture.get("output_modalities")
+    return (
+        isinstance(inputs, list)
+        and isinstance(outputs, list)
+        and "image" in inputs
+        and "text" in outputs
+    )
+
+
+def free_vision_settings(config: dict[str, Any]) -> tuple[bool, list[str], list[str]]:
+    raw = config.get("free_vision", {})
+    if not isinstance(raw, dict):
+        raise ConfigError("[free_vision] must be a table")
+    enabled = bool(raw.get("enabled", False))
+    prefixes = raw.get("exclude_model_prefixes", [])
+    if not isinstance(prefixes, list) or not all(isinstance(value, str) for value in prefixes):
+        raise ConfigError("free_vision.exclude_model_prefixes must be a list of strings")
+    substrings = raw.get("exclude_model_substrings", [])
+    if not isinstance(substrings, list) or not all(isinstance(value, str) for value in substrings):
+        raise ConfigError("free_vision.exclude_model_substrings must be a list of strings")
+    return enabled, [value.lower() for value in prefixes], [value.lower() for value in substrings]
+
+
+def model_is_free(entry: dict[str, Any]) -> bool:
+    pricing = entry.get("pricing")
+    if not isinstance(pricing, dict):
+        return False
+    try:
+        return float(pricing.get("prompt", 1)) == 0 and float(pricing.get("completion", 1)) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def discover_free_vision_models(
+    catalog: dict[str, dict[str, Any]], exclude_prefixes: list[str], exclude_substrings: list[str]
+) -> list[Model]:
+    """Find every current free OpenRouter model that can read the reference image."""
+    discovered: list[Model] = []
+    for model_id, entry in catalog.items():
+        lower_id = model_id.lower()
+        if any(lower_id.startswith(prefix) for prefix in exclude_prefixes):
+            continue
+        if any(fragment in lower_id for fragment in exclude_substrings):
+            continue
+        if not model_is_free(entry) or not model_supports_image_to_text(entry):
+            continue
+        name = entry.get("name")
+        label = str(name).strip() if isinstance(name, str) else model_id
+        discovered.append(Model(label, model_id, {}, source="OpenRouter free vision discovery"))
+    return sorted(discovered, key=lambda model: (model.label.lower(), model.model_id))
+
+
+def deduplicate_models(models: list[Model]) -> list[Model]:
+    """Keep the first spelling of each exact provider/model id."""
+    seen: set[str] = set()
+    result: list[Model] = []
+    for model in models:
+        if model.model_id in seen:
+            continue
+        seen.add(model.model_id)
+        result.append(model)
+    return result
+
+
+def preflight_models(
+    models: list[Model], default_endpoint: str, catalog: dict[str, dict[str, Any]]
+) -> tuple[list[Model], list[dict[str, str]]]:
+    """Skip OpenRouter models that cannot consume an image before any paid request."""
+    runnable: list[Model] = []
+    skipped: list[dict[str, str]] = []
+    for model in models:
+        endpoint = model.endpoint or default_endpoint
+        if not is_openrouter_endpoint(endpoint):
+            runnable.append(model)
+            continue
+        entry = catalog.get(model.model_id)
+        if entry is None:
+            reason = "not in the current OpenRouter model catalog"
+        elif not model_supports_image_to_text(entry):
+            architecture = entry.get("architecture", {})
+            inputs = architecture.get("input_modalities", []) if isinstance(architecture, dict) else []
+            input_summary = ", ".join(str(value) for value in inputs) or "unknown"
+            reason = f"does not advertise image input (inputs: {input_summary})"
+        else:
+            runnable.append(model)
+            continue
+        skipped.append(
+            {
+                "label": model.label,
+                "model_id": model.model_id,
+                "source": model.source,
+                "reason": reason,
+            }
+        )
+    return runnable, skipped
 
 
 def vote_url(vote_page: str, test_id: str) -> str:
@@ -404,11 +540,23 @@ def write_bundle(run_dir: Path) -> Path:
     return destination
 
 
-def plan(models: list[Model], ids: list[str], config: dict[str, Any]) -> None:
+def plan(
+    models: list[Model],
+    ids: list[str],
+    config: dict[str, Any],
+    free_vision_enabled: bool,
+    skipped: list[dict[str, str]] | None = None,
+) -> None:
     print(f"Tests: {', '.join(ids)}")
     print(f"Enabled models: {len(models)}")
     for model in models:
         print(f"  - {model.label}: {model.model_id}")
+    if free_vision_enabled:
+        print("Free vision discovery: on (current free image-capable OpenRouter models)")
+    if skipped:
+        print(f"Skipped before API calls: {len(skipped)} model(s) without image input")
+        for item in skipped:
+            print(f"  - {item['label']}: {item['reason']}")
     print(f"Planned requests: {len(models) * len(ids)}")
     cap = config.get("run", {}).get("max_total_cost_usd")
     if cap is not None:
@@ -432,18 +580,24 @@ def main(argv: list[str] | None = None) -> int:
         benchmark = config.get("benchmark")
         if not isinstance(run, dict) or not isinstance(benchmark, dict):
             raise ConfigError("Config needs [run] and [benchmark] tables")
-        models = selected_models(config, args.model)
+        static_models = configured_models(config)
         ids = test_ids(config, args.test)
-        plan(models, ids, config)
+        free_vision_enabled, exclude_prefixes, exclude_substrings = free_vision_settings(config)
 
         if not args.execute:
+            models = select_requested_models(static_models, args.model)
+            plan(models, ids, config, free_vision_enabled)
             if not models:
-                print("\nNo models are enabled yet. Edit models.toml, then re-run.")
+                if free_vision_enabled:
+                    print(
+                        "\nNo catalog models are enabled. With --execute, the runner will also "
+                        "add every current free image-capable OpenRouter model."
+                    )
+                else:
+                    print("\nNo models are enabled yet. Edit models.toml, then re-run.")
             else:
                 print("\nDry run only. Add --execute to make API calls.")
             return 0
-        if not models:
-            raise ConfigError("Enable at least one model in models.toml before --execute")
 
         endpoint = str(run.get("endpoint", "")).strip()
         key_env = str(run.get("api_key_env", "")).strip()
@@ -455,6 +609,22 @@ def main(argv: list[str] | None = None) -> int:
         retry_attempts = int(run.get("retry_attempts", 2))
         image_detail = str(run.get("image_detail", "")).strip() or None
         cost_cap = float(run.get("max_total_cost_usd", 0))
+
+        uses_openrouter = free_vision_enabled or any(
+            is_openrouter_endpoint(model.endpoint or endpoint) for model in static_models
+        )
+        catalog = openrouter_catalog(timeout_seconds) if uses_openrouter else {}
+        models = list(static_models)
+        if free_vision_enabled:
+            models.extend(discover_free_vision_models(catalog, exclude_prefixes, exclude_substrings))
+        models = select_requested_models(deduplicate_models(models), args.model)
+        runnable_models, skipped_models = preflight_models(models, endpoint, catalog)
+        plan(runnable_models, ids, config, free_vision_enabled, skipped_models)
+        if not models:
+            raise ConfigError("Enable a model or turn on free_vision before --execute")
+        if not runnable_models:
+            raise ConfigError("None of the selected models can read an image on OpenRouter")
+        models = runnable_models
 
         run_name = args.run_name or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_dir = ROOT / "runs" / safe_name(run_name)
@@ -485,6 +655,7 @@ def main(argv: list[str] | None = None) -> int:
                 ],
             },
             "models": [asdict(model) for model in models],
+            "skipped_models": skipped_models,
             "artifacts": [],
             "reported_total_cost_usd": 0.0,
         }
@@ -582,4 +753,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
