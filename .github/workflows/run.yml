@@ -1,0 +1,52 @@
+name: Run Ducky Bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_name:
+        description: Optional label for the downloaded artifact
+        required: false
+        default: github
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ducky-bench-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the OpenRouter secret
+        shell: bash
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "Add a repository secret named OPENROUTER_API_KEY, then run again."
+            exit 1
+          fi
+
+      - name: Run the selected models
+        run: python3 run.py --execute --run-name "${{ inputs.run_name }}-${{ github.run_id }}"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ducky-bench-${{ github.run_id }}
+          path: runs/
+          if-no-files-found: warn
+          retention-days: 14
