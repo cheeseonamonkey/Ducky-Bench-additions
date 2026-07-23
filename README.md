@@ -1,3 +1,7 @@
+
+# archived once I realized they already do exactly this [here](https://duckbench.com/generate) 😅 
+
+
 # Ducky Bench additions
 
 A tiny runner for trying OpenRouter models on Ducky Bench's public SVG-image tasks.
